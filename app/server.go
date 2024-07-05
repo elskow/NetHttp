@@ -10,6 +10,13 @@ import (
 	"strings"
 )
 
+var directoryFlag string
+
+func init() {
+	flag.StringVar(&directoryFlag, "directory", "/tmp", "directory to create files in")
+	flag.Parse()
+}
+
 type HandlerFunc func(conn net.Conn, request *HTTPRequest, params map[string]string)
 
 type Server struct {
@@ -27,10 +34,6 @@ type HTTPRequest struct {
 func main() {
 	server := NewServer("4221")
 
-	var dir string
-	flag.StringVar(&dir, "directory", "", "Directory where files are stored")
-	flag.Parse()
-
 	server.HandleFunc("/", func(conn net.Conn, request *HTTPRequest, params map[string]string) {
 		server.sendResponse(conn, "HTTP/1.1 200 OK", "text/plain", "")
 	})
@@ -43,17 +46,49 @@ func main() {
 		server.sendResponse(conn, "HTTP/1.1 200 OK", "text/plain", userAgent)
 	})
 	server.HandleFunc("/files/:filename", func(conn net.Conn, request *HTTPRequest, params map[string]string) {
-		filename := params["filename"]
-		filePath := fmt.Sprintf("%s%s", dir, filename)
-		log.Printf("Reading file: %s", filePath)
+		method := request.Method
 
-		content, err := os.ReadFile(filePath)
-		if err != nil {
-			server.sendResponse(conn, "HTTP/1.1 404 Not Found", "text/plain", "")
-			return
+		switch method {
+
+		case "GET":
+			filename := params["filename"]
+			filePath := fmt.Sprintf("%s%s", directoryFlag, filename)
+			log.Printf("Reading file: %s", filePath)
+
+			content, err := os.ReadFile(filePath)
+			if err != nil {
+				server.sendResponse(conn, "HTTP/1.1 404 Not Found", "text/plain", "")
+				return
+			}
+
+			server.sendResponse(conn, "HTTP/1.1 200 OK", "application/octet-stream", string(content))
+
+		case "POST":
+			filename := params["filename"]
+			filePath := fmt.Sprintf("%s%s", directoryFlag, filename)
+			log.Printf("Writing file: %s", filePath)
+
+			body := request.Body
+			log.Printf("Body: %s", body)
+			err := os.WriteFile(filePath, []byte(body), 0644)
+			if err != nil {
+				log.Printf("Error writing file: %s", err)
+				server.sendResponse(conn, "HTTP/1.1 500 Internal Server Error", "text/plain", "")
+				return
+			}
+
+			writtenContent, err := os.ReadFile(filePath)
+			if err != nil {
+				log.Printf("Error reading back the written file: %s", err)
+				server.sendResponse(conn, "HTTP/1.1 500 Internal Server Error", "text/plain", "")
+				return
+			}
+
+			server.sendResponse(conn, "HTTP/1.1 201 Created", "application/octet-stream", string(writtenContent))
+
+		default:
+			server.sendResponse(conn, "HTTP/1.1 405 Method Not Allowed", "text/plain", "")
 		}
-
-		server.sendResponse(conn, "HTTP/1.1 200 OK", "application/octet-stream", string(content))
 	})
 
 	server.ListenAndServe()
@@ -141,10 +176,16 @@ func (s *Server) parseRequest(conn net.Conn) (*HTTPRequest, error) {
 		return nil, err
 	}
 
+	body, err := s.parseBody(reader, headers)
+	if err != nil {
+		return nil, err
+	}
+
 	return &HTTPRequest{
 		Method:  method,
 		Path:    path,
 		Headers: headers,
+		Body:    body,
 	}, nil
 }
 
@@ -174,6 +215,29 @@ func (s *Server) parseHeaders(reader *bufio.Reader) (map[string]string, error) {
 		headers[parts[0]] = parts[1]
 	}
 	return headers, nil
+}
+
+func (s *Server) parseBody(reader *bufio.Reader, headers map[string]string) (string, error) {
+	contentLength, ok := headers["Content-Length"]
+	if !ok {
+		return "", nil
+	}
+
+	return s.readBody(reader, contentLength)
+}
+
+func (s *Server) readBody(reader *bufio.Reader, contentLength string) (string, error) {
+	length := 0
+
+	fmt.Sscanf(contentLength, "%d", &length)
+	body := make([]byte, length)
+
+	_, err := reader.Read(body)
+	if err != nil {
+		return "", err
+	}
+
+	return string(body), nil
 }
 
 func (s *Server) sendResponse(conn net.Conn, statusLine, contentType, body string) {
