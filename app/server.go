@@ -3,12 +3,24 @@ package main
 import (
 	"log"
 	"net"
+	"strconv"
 	"strings"
 )
 
 const (
-	OK        = "HTTP/1.1 200 OK\r\n\r\n"
-	NOT_FOUND = "HTTP/1.1 404 Not Found\r\n\r\n"
+	CLRF = "\r\n"
+)
+
+// Response codes
+const (
+	OK        = "HTTP/1.1 200 OK"
+	NOT_FOUND = "HTTP/1.1 404 Not Found"
+)
+
+// URL path
+const (
+	RootPath = "/"
+	EchoPath = "/echo"
 )
 
 func main() {
@@ -47,11 +59,20 @@ func handleRequest(conn net.Conn) {
 
 	req := string(buf[:n])
 	path := extractUrlPath(req)
+	log.Println("Request path:", path)
 
-	if path == "/" {
-		conn.Write([]byte(OK))
+	if path == RootPath {
+		conn.Write([]byte(OK + CLRF + CLRF))
+	} else if strings.HasPrefix(path, EchoPath) {
+		responseBody := path[len(EchoPath)+1:]
+
+		conn.Write([]byte(OK + CLRF))
+		conn.Write([]byte("Content-Type: text/plain" + CLRF))
+		conn.Write([]byte("Content-Length: " + strconv.Itoa(len(responseBody)) + CLRF + CLRF))
+		conn.Write([]byte(responseBody))
+
 	} else {
-		conn.Write([]byte(NOT_FOUND))
+		conn.Write([]byte(NOT_FOUND + CLRF + CLRF))
 	}
 }
 
