@@ -2,13 +2,15 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"strings"
 )
 
-type HandlerFunc func(conn net.Conn, request *HTTPRequest)
+type HandlerFunc func(conn net.Conn, request *HTTPRequest, params map[string]string)
 
 type Server struct {
 	port   string
@@ -24,20 +26,34 @@ type HTTPRequest struct {
 
 func main() {
 	server := NewServer("4221")
-	server.HandleFunc("/", func(conn net.Conn, request *HTTPRequest) {
+
+	var dir string
+	flag.StringVar(&dir, "directory", "", "Directory where files are stored")
+	flag.Parse()
+
+	server.HandleFunc("/", func(conn net.Conn, request *HTTPRequest, params map[string]string) {
 		server.sendResponse(conn, "HTTP/1.1 200 OK", "text/plain", "")
 	})
-	server.HandleFunc("/echo/*", func(conn net.Conn, request *HTTPRequest) {
-		pathParts := strings.Split(request.Path, "/")
-		if len(pathParts) < 3 {
-			server.sendResponse(conn, "HTTP/1.1 400 Bad Request", "text/plain", "Invalid path")
-			return
-		}
-		server.sendResponse(conn, "HTTP/1.1 200 OK", "text/plain", pathParts[2])
+	server.HandleFunc("/echo/:message", func(conn net.Conn, request *HTTPRequest, params map[string]string) {
+		message := params["message"]
+		server.sendResponse(conn, "HTTP/1.1 200 OK", "text/plain", message)
 	})
-	server.HandleFunc("/user-agent", func(conn net.Conn, request *HTTPRequest) {
+	server.HandleFunc("/user-agent", func(conn net.Conn, request *HTTPRequest, params map[string]string) {
 		userAgent := request.Headers["User-Agent"]
 		server.sendResponse(conn, "HTTP/1.1 200 OK", "text/plain", userAgent)
+	})
+	server.HandleFunc("/files/:filename", func(conn net.Conn, request *HTTPRequest, params map[string]string) {
+		filename := params["filename"]
+		filePath := fmt.Sprintf("%s%s", dir, filename)
+		log.Printf("Reading file: %s", filePath)
+
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			server.sendResponse(conn, "HTTP/1.1 404 Not Found", "text/plain", "")
+			return
+		}
+
+		server.sendResponse(conn, "HTTP/1.1 200 OK", "application/octet-stream", string(content))
 	})
 
 	server.ListenAndServe()
@@ -77,22 +93,35 @@ func (s *Server) handleConnection(conn net.Conn) {
 		return
 	}
 
-	if handler, ok := s.routes[request.Path]; ok {
-		handler(conn, request)
-		return
-	}
-
 	for route, handler := range s.routes {
-		if strings.Contains(route, "*") {
-			baseRoute := strings.Split(route, "*")[0]
-			if strings.HasPrefix(request.Path, baseRoute) {
-				handler(conn, request)
-				return
-			}
+		params := make(map[string]string)
+		if s.matchRoute(request.Path, route, params) {
+			handler(conn, request, params)
+			return
 		}
 	}
 
 	s.sendResponse(conn, "HTTP/1.1 404 Not Found", "text/plain", "")
+}
+
+func (s *Server) matchRoute(requestPath, route string, params map[string]string) bool {
+	routeParts := strings.Split(route, "/")
+	pathParts := strings.Split(requestPath, "/")
+
+	if len(routeParts) != len(pathParts) {
+		return false
+	}
+
+	for i, part := range routeParts {
+		if strings.HasPrefix(part, ":") {
+			paramName := part[1:]
+			params[paramName] = pathParts[i]
+		} else if part != pathParts[i] {
+			return false
+		}
+	}
+
+	return true
 }
 
 func (s *Server) parseRequest(conn net.Conn) (*HTTPRequest, error) {
