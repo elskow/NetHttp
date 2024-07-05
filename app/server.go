@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"flag"
 	"fmt"
 	"log"
@@ -37,77 +39,78 @@ func main() {
 	server.HandleFunc("/", func(conn net.Conn, request *HTTPRequest, params map[string]string) {
 		server.sendResponse(conn, "HTTP/1.1 200 OK", "text/plain", "", "", false)
 	})
-	server.HandleFunc("/echo/:message", func(conn net.Conn, request *HTTPRequest, params map[string]string) {
-		message := params["message"]
-		acceptEncoding := request.Headers["Accept-Encoding"]
-		encodings := strings.Split(acceptEncoding, ",")
-		gzipSupported := false
-
-		for _, encoding := range encodings {
-			if strings.TrimSpace(encoding) == "gzip" {
-				gzipSupported = true
-				break
-			}
-		}
-
-		if gzipSupported {
-			server.sendResponse(conn, "HTTP/1.1 200 OK", "text/plain", message, "gzip", true)
-		} else {
-			// Respond without compression
-			server.sendResponse(conn, "HTTP/1.1 200 OK", "text/plain", message, "", false)
-		}
-	})
+	server.HandleFunc("/echo/:message", server.handleEchoMessage)
 	server.HandleFunc("/user-agent", func(conn net.Conn, request *HTTPRequest, params map[string]string) {
 		userAgent := request.Headers["User-Agent"]
 		server.sendResponse(conn, "HTTP/1.1 200 OK", "text/plain", userAgent, "", false)
 	})
-	server.HandleFunc("/files/:filename", func(conn net.Conn, request *HTTPRequest, params map[string]string) {
-		method := request.Method
-
-		switch method {
-
-		case "GET":
-			filename := params["filename"]
-			filePath := fmt.Sprintf("%s%s", directoryFlag, filename)
-			log.Printf("Reading file: %s", filePath)
-
-			content, err := os.ReadFile(filePath)
-			if err != nil {
-				server.sendResponse(conn, "HTTP/1.1 404 Not Found", "text/plain", "", "", false)
-				return
-			}
-
-			server.sendResponse(conn, "HTTP/1.1 200 OK", "application/octet-stream", string(content), "", false)
-
-		case "POST":
-			filename := params["filename"]
-			filePath := fmt.Sprintf("%s%s", directoryFlag, filename)
-			log.Printf("Writing file: %s", filePath)
-
-			body := request.Body
-			log.Printf("Body: %s", body)
-			err := os.WriteFile(filePath, []byte(body), 0644)
-			if err != nil {
-				log.Printf("Error writing file: %s", err)
-				server.sendResponse(conn, "HTTP/1.1 500 Internal Server Error", "text/plain", "", "", false)
-				return
-			}
-
-			writtenContent, err := os.ReadFile(filePath)
-			if err != nil {
-				log.Printf("Error reading back the written file: %s", err)
-				server.sendResponse(conn, "HTTP/1.1 500 Internal Server Error", "text/plain", "", "", false)
-				return
-			}
-
-			server.sendResponse(conn, "HTTP/1.1 201 Created", "application/octet-stream", string(writtenContent), "", false)
-
-		default:
-			server.sendResponse(conn, "HTTP/1.1 405 Method Not Allowed", "text/plain", "", "", false)
-		}
-	})
+	server.HandleFunc("/files/:filename", server.handleFiles)
 
 	server.ListenAndServe()
+}
+
+func (s *Server) handleEchoMessage(conn net.Conn, request *HTTPRequest, params map[string]string) {
+	message := params["message"]
+	acceptEncoding := request.Headers["Accept-Encoding"]
+	encodings := strings.Split(acceptEncoding, ",")
+	gzipSupported := false
+
+	for _, encoding := range encodings {
+		if strings.TrimSpace(encoding) == "gzip" {
+			gzipSupported = true
+			break
+		}
+	}
+
+	if gzipSupported {
+		s.sendResponse(conn, "HTTP/1.1 200 OK", "text/plain", message, "gzip", true)
+	} else {
+		s.sendResponse(conn, "HTTP/1.1 200 OK", "text/plain", message, "", false)
+	}
+}
+
+func (s *Server) handleFiles(conn net.Conn, request *HTTPRequest, params map[string]string) {
+	method := request.Method
+	filename := params["filename"]
+	filePath := fmt.Sprintf("%s%s", directoryFlag, filename)
+
+	switch method {
+
+	case "GET":
+		log.Printf("Reading file: %s", filePath)
+
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			s.sendResponse(conn, "HTTP/1.1 404 Not Found", "text/plain", "", "", false)
+			return
+		}
+
+		s.sendResponse(conn, "HTTP/1.1 200 OK", "application/octet-stream", string(content), "", false)
+
+	case "POST":
+		log.Printf("Writing file: %s", filePath)
+
+		body := request.Body
+		log.Printf("Body: %s", body)
+		err := os.WriteFile(filePath, []byte(body), 0644)
+		if err != nil {
+			log.Printf("Error writing file: %s", err)
+			s.sendResponse(conn, "HTTP/1.1 500 Internal Server Error", "text/plain", "", "", false)
+			return
+		}
+
+		writtenContent, err := os.ReadFile(filePath)
+		if err != nil {
+			log.Printf("Error reading back the written file: %s", err)
+			s.sendResponse(conn, "HTTP/1.1 500 Internal Server Error", "text/plain", "", "", false)
+			return
+		}
+
+		s.sendResponse(conn, "HTTP/1.1 201 Created", "application/octet-stream", string(writtenContent), "", false)
+
+	default:
+		s.sendResponse(conn, "HTTP/1.1 405 Method Not Allowed", "text/plain", "", "", false)
+	}
 }
 
 func NewServer(port string) *Server {
@@ -257,13 +260,31 @@ func (s *Server) readBody(reader *bufio.Reader, contentLength string) (string, e
 }
 
 func (s *Server) sendResponse(conn net.Conn, statusLine, contentType, body string, contentEncoding string, bodyIsCompressed bool) {
+	var bodyBytes []byte
 	headers := fmt.Sprintf("%s\r\nContent-Type: %s\r\n", statusLine, contentType)
-	if bodyIsCompressed {
+
+	if bodyIsCompressed && contentEncoding == "gzip" {
 		headers += fmt.Sprintf("Content-Encoding: %s\r\n", contentEncoding)
+		var b bytes.Buffer
+		gz := gzip.NewWriter(&b)
+		_, err := gz.Write([]byte(body))
+		if err != nil {
+			log.Printf("Failed to compress body: %v", err)
+			return
+		}
+		err = gz.Close()
+		if err != nil {
+			log.Printf("Failed to close gzip writer: %v", err)
+			return
+		}
+		bodyBytes = b.Bytes()
+	} else {
+		bodyBytes = []byte(body)
 	}
 
-	headers += fmt.Sprintf("Content-Length: %d\r\n\r\n", len(body))
-	conn.Write([]byte(headers + body))
+	headers += fmt.Sprintf("Content-Length: %d\r\n\r\n", len(bodyBytes))
+	conn.Write([]byte(headers))
+	conn.Write(bodyBytes)
 }
 
 func (s *Server) HandleFunc(path string, handlerFunc HandlerFunc) {
