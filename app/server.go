@@ -35,15 +35,20 @@ func main() {
 	server := NewServer("4221")
 
 	server.HandleFunc("/", func(conn net.Conn, request *HTTPRequest, params map[string]string) {
-		server.sendResponse(conn, "HTTP/1.1 200 OK", "text/plain", "")
+		server.sendResponse(conn, "HTTP/1.1 200 OK", "text/plain", "", "", false)
 	})
 	server.HandleFunc("/echo/:message", func(conn net.Conn, request *HTTPRequest, params map[string]string) {
 		message := params["message"]
-		server.sendResponse(conn, "HTTP/1.1 200 OK", "text/plain", message)
+		acceptEncoding := request.Headers["Accept-Encoding"]
+		if strings.Contains(acceptEncoding, "gzip") {
+			server.sendResponse(conn, "HTTP/1.1 200 OK", "text/plain", message, "gzip", true)
+		} else {
+			server.sendResponse(conn, "HTTP/1.1 200 OK", "text/plain", message, "", false)
+		}
 	})
 	server.HandleFunc("/user-agent", func(conn net.Conn, request *HTTPRequest, params map[string]string) {
 		userAgent := request.Headers["User-Agent"]
-		server.sendResponse(conn, "HTTP/1.1 200 OK", "text/plain", userAgent)
+		server.sendResponse(conn, "HTTP/1.1 200 OK", "text/plain", userAgent, "", false)
 	})
 	server.HandleFunc("/files/:filename", func(conn net.Conn, request *HTTPRequest, params map[string]string) {
 		method := request.Method
@@ -57,11 +62,11 @@ func main() {
 
 			content, err := os.ReadFile(filePath)
 			if err != nil {
-				server.sendResponse(conn, "HTTP/1.1 404 Not Found", "text/plain", "")
+				server.sendResponse(conn, "HTTP/1.1 404 Not Found", "text/plain", "", "", false)
 				return
 			}
 
-			server.sendResponse(conn, "HTTP/1.1 200 OK", "application/octet-stream", string(content))
+			server.sendResponse(conn, "HTTP/1.1 200 OK", "application/octet-stream", string(content), "", false)
 
 		case "POST":
 			filename := params["filename"]
@@ -73,21 +78,21 @@ func main() {
 			err := os.WriteFile(filePath, []byte(body), 0644)
 			if err != nil {
 				log.Printf("Error writing file: %s", err)
-				server.sendResponse(conn, "HTTP/1.1 500 Internal Server Error", "text/plain", "")
+				server.sendResponse(conn, "HTTP/1.1 500 Internal Server Error", "text/plain", "", "", false)
 				return
 			}
 
 			writtenContent, err := os.ReadFile(filePath)
 			if err != nil {
 				log.Printf("Error reading back the written file: %s", err)
-				server.sendResponse(conn, "HTTP/1.1 500 Internal Server Error", "text/plain", "")
+				server.sendResponse(conn, "HTTP/1.1 500 Internal Server Error", "text/plain", "", "", false)
 				return
 			}
 
-			server.sendResponse(conn, "HTTP/1.1 201 Created", "application/octet-stream", string(writtenContent))
+			server.sendResponse(conn, "HTTP/1.1 201 Created", "application/octet-stream", string(writtenContent), "", false)
 
 		default:
-			server.sendResponse(conn, "HTTP/1.1 405 Method Not Allowed", "text/plain", "")
+			server.sendResponse(conn, "HTTP/1.1 405 Method Not Allowed", "text/plain", "", "", false)
 		}
 	})
 
@@ -136,7 +141,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		}
 	}
 
-	s.sendResponse(conn, "HTTP/1.1 404 Not Found", "text/plain", "")
+	s.sendResponse(conn, "HTTP/1.1 404 Not Found", "text/plain", "", "", false)
 }
 
 func (s *Server) matchRoute(requestPath, route string, params map[string]string) bool {
@@ -240,8 +245,13 @@ func (s *Server) readBody(reader *bufio.Reader, contentLength string) (string, e
 	return string(body), nil
 }
 
-func (s *Server) sendResponse(conn net.Conn, statusLine, contentType, body string) {
-	headers := fmt.Sprintf("%s\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n", statusLine, contentType, len(body))
+func (s *Server) sendResponse(conn net.Conn, statusLine, contentType, body string, contentEncoding string, bodyIsCompressed bool) {
+	headers := fmt.Sprintf("%s\r\nContent-Type: %s\r\n", statusLine, contentType)
+	if bodyIsCompressed {
+		headers += fmt.Sprintf("Content-Encoding: %s\r\n", contentEncoding)
+	}
+
+	headers += fmt.Sprintf("Content-Length: %d\r\n\r\n", len(body))
 	conn.Write([]byte(headers + body))
 }
 
