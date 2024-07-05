@@ -40,9 +40,20 @@ func main() {
 	server.HandleFunc("/echo/:message", func(conn net.Conn, request *HTTPRequest, params map[string]string) {
 		message := params["message"]
 		acceptEncoding := request.Headers["Accept-Encoding"]
-		if strings.Contains(acceptEncoding, "gzip") {
+		encodings := strings.Split(acceptEncoding, ",")
+		gzipSupported := false
+
+		for _, encoding := range encodings {
+			if strings.TrimSpace(encoding) == "gzip" {
+				gzipSupported = true
+				break
+			}
+		}
+
+		if gzipSupported {
 			server.sendResponse(conn, "HTTP/1.1 200 OK", "text/plain", message, "gzip", true)
 		} else {
+			// Respond without compression
 			server.sendResponse(conn, "HTTP/1.1 200 OK", "text/plain", message, "", false)
 		}
 	})
