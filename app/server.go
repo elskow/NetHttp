@@ -4,20 +4,34 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
-	"flag"
 	"fmt"
 	"log"
 	"net"
-	"os"
 	"strings"
 )
 
-var directoryFlag string
+// Types and Constants Definitions
 
-func init() {
-	flag.StringVar(&directoryFlag, "directory", "/tmp", "directory to create files in")
-	flag.Parse()
-}
+type HTTPMethod string
+type StatusCode string
+type ContentType string
+
+const (
+	MethodGet  HTTPMethod = "GET"
+	MethodPost HTTPMethod = "POST"
+
+	StatusOK                  StatusCode = "HTTP/1.1 200 OK"
+	StatusNotFound            StatusCode = "HTTP/1.1 404 Not Found"
+	StatusInternalServerError StatusCode = "HTTP/1.1 500 Internal Server Error"
+	StatusCreated             StatusCode = "HTTP/1.1 201 Created"
+	StatusMethodNotAllowed    StatusCode = "HTTP/1.1 405 Method Not Allowed"
+
+	ContentTypePlainText       ContentType = "text/plain"
+	ContentTypeOctetStream     ContentType = "application/octet-stream"
+	ContentTypeApplicationJSON ContentType = "application/json"
+)
+
+// Route Handler
 
 type HandlerFunc func(conn net.Conn, request *HTTPRequest, params map[string]string)
 
@@ -26,92 +40,18 @@ type Server struct {
 	routes map[string]HandlerFunc
 }
 
+func (s *Server) HandleFunc(path string, handlerFunc HandlerFunc) {
+	s.routes[path] = handlerFunc
+}
+
 type HTTPRequest struct {
-	Method  string
+	Method  HTTPMethod
 	Path    string
 	Headers map[string]string
 	Body    string
 }
 
-func main() {
-	server := NewServer("4221")
-
-	server.HandleFunc("/", func(conn net.Conn, request *HTTPRequest, params map[string]string) {
-		server.sendResponse(conn, "HTTP/1.1 200 OK", "text/plain", "", "", false)
-	})
-	server.HandleFunc("/echo/:message", server.handleEchoMessage)
-	server.HandleFunc("/user-agent", func(conn net.Conn, request *HTTPRequest, params map[string]string) {
-		userAgent := request.Headers["User-Agent"]
-		server.sendResponse(conn, "HTTP/1.1 200 OK", "text/plain", userAgent, "", false)
-	})
-	server.HandleFunc("/files/:filename", server.handleFiles)
-
-	server.ListenAndServe()
-}
-
-func (s *Server) handleEchoMessage(conn net.Conn, request *HTTPRequest, params map[string]string) {
-	message := params["message"]
-	acceptEncoding := request.Headers["Accept-Encoding"]
-	encodings := strings.Split(acceptEncoding, ",")
-	gzipSupported := false
-
-	for _, encoding := range encodings {
-		if strings.TrimSpace(encoding) == "gzip" {
-			gzipSupported = true
-			break
-		}
-	}
-
-	if gzipSupported {
-		s.sendResponse(conn, "HTTP/1.1 200 OK", "text/plain", message, "gzip", true)
-	} else {
-		s.sendResponse(conn, "HTTP/1.1 200 OK", "text/plain", message, "", false)
-	}
-}
-
-func (s *Server) handleFiles(conn net.Conn, request *HTTPRequest, params map[string]string) {
-	method := request.Method
-	filename := params["filename"]
-	filePath := fmt.Sprintf("%s%s", directoryFlag, filename)
-
-	switch method {
-
-	case "GET":
-		log.Printf("Reading file: %s", filePath)
-
-		content, err := os.ReadFile(filePath)
-		if err != nil {
-			s.sendResponse(conn, "HTTP/1.1 404 Not Found", "text/plain", "", "", false)
-			return
-		}
-
-		s.sendResponse(conn, "HTTP/1.1 200 OK", "application/octet-stream", string(content), "", false)
-
-	case "POST":
-		log.Printf("Writing file: %s", filePath)
-
-		body := request.Body
-		log.Printf("Body: %s", body)
-		err := os.WriteFile(filePath, []byte(body), 0644)
-		if err != nil {
-			log.Printf("Error writing file: %s", err)
-			s.sendResponse(conn, "HTTP/1.1 500 Internal Server Error", "text/plain", "", "", false)
-			return
-		}
-
-		writtenContent, err := os.ReadFile(filePath)
-		if err != nil {
-			log.Printf("Error reading back the written file: %s", err)
-			s.sendResponse(conn, "HTTP/1.1 500 Internal Server Error", "text/plain", "", "", false)
-			return
-		}
-
-		s.sendResponse(conn, "HTTP/1.1 201 Created", "application/octet-stream", string(writtenContent), "", false)
-
-	default:
-		s.sendResponse(conn, "HTTP/1.1 405 Method Not Allowed", "text/plain", "", "", false)
-	}
-}
+// Server Handler
 
 func NewServer(port string) *Server {
 	return &Server{
@@ -155,7 +95,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		}
 	}
 
-	s.sendResponse(conn, "HTTP/1.1 404 Not Found", "text/plain", "", "", false)
+	s.sendResponse(conn, StatusNotFound, ContentTypePlainText, "", "", false)
 }
 
 func (s *Server) matchRoute(requestPath, route string, params map[string]string) bool {
@@ -178,6 +118,10 @@ func (s *Server) matchRoute(requestPath, route string, params map[string]string)
 	return true
 }
 
+// Response and Request Handler
+
+// Parse the request from the client.
+// https://developer.mozilla.org/en-US/docs/Web/HTTP/Messages#http_requests
 func (s *Server) parseRequest(conn net.Conn) (*HTTPRequest, error) {
 	reader := bufio.NewReader(conn)
 	requestLine, err := reader.ReadString('\n')
@@ -208,12 +152,16 @@ func (s *Server) parseRequest(conn net.Conn) (*HTTPRequest, error) {
 	}, nil
 }
 
-func (s *Server) parseRequestLine(requestLine string) (string, string, error) {
+func (s *Server) parseRequestLine(requestLine string) (HTTPMethod, string, error) {
 	parts := strings.Split(strings.TrimSpace(requestLine), " ")
 	if len(parts) < 2 {
 		return "", "", fmt.Errorf("malformed request line")
 	}
-	return parts[0], parts[1], nil
+	method := HTTPMethod(parts[0])
+	if method != MethodGet && method != MethodPost {
+		return "", "", fmt.Errorf("unsupported method: %s", method)
+	}
+	return method, parts[1], nil
 }
 
 func (s *Server) parseHeaders(reader *bufio.Reader) (map[string]string, error) {
@@ -259,21 +207,22 @@ func (s *Server) readBody(reader *bufio.Reader, contentLength string) (string, e
 	return string(body), nil
 }
 
-func (s *Server) sendResponse(conn net.Conn, statusLine, contentType, body string, contentEncoding string, bodyIsCompressed bool) {
+// Send a response to the client.
+// https://developer.mozilla.org/en-US/docs/Web/HTTP/Messages#http_responses
+func (s *Server) sendResponse(conn net.Conn, status StatusCode, contentType ContentType, body, contentEncoding string, bodyIsCompressed bool) {
 	var bodyBytes []byte
-	headers := fmt.Sprintf("%s\r\nContent-Type: %s\r\n", statusLine, contentType)
+	headers := fmt.Sprintf("%s\r\nContent-Type: %s\r\n", status, contentType)
 
 	if bodyIsCompressed && contentEncoding == "gzip" {
 		headers += fmt.Sprintf("Content-Encoding: %s\r\n", contentEncoding)
 		var b bytes.Buffer
 		gz := gzip.NewWriter(&b)
-		_, err := gz.Write([]byte(body))
-		if err != nil {
+		defer gz.Close()
+		if _, err := gz.Write([]byte(body)); err != nil {
 			log.Printf("Failed to compress body: %v", err)
 			return
 		}
-		err = gz.Close()
-		if err != nil {
+		if err := gz.Close(); err != nil {
 			log.Printf("Failed to close gzip writer: %v", err)
 			return
 		}
@@ -283,10 +232,11 @@ func (s *Server) sendResponse(conn net.Conn, statusLine, contentType, body strin
 	}
 
 	headers += fmt.Sprintf("Content-Length: %d\r\n\r\n", len(bodyBytes))
-	conn.Write([]byte(headers))
-	conn.Write(bodyBytes)
-}
-
-func (s *Server) HandleFunc(path string, handlerFunc HandlerFunc) {
-	s.routes[path] = handlerFunc
+	if _, err := conn.Write([]byte(headers)); err != nil {
+		log.Printf("Failed to write headers: %v", err)
+		return
+	}
+	if _, err := conn.Write(bodyBytes); err != nil {
+		log.Printf("Failed to write body: %v", err)
+	}
 }
